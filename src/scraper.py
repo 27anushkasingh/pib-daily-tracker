@@ -122,22 +122,99 @@ class PIBScraper:
         soup = BeautifulSoup(response.content, PARSER)
         releases = []
         
-        # Parse release items from the page
-        release_items = soup.find_all("div", class_="content")
+        # Try multiple selectors - PIB website structure may vary
+        # First try table structure (most common)
+        table_rows = soup.find_all("tr")
         
-        for item in release_items:
-            try:
-                release = self._parse_release_item(item, date)
-                if release:
-                    releases.append(release)
-            except Exception as e:
-                logger.warning(f"Error parsing release item: {e}")
-                continue
+        if table_rows:
+            logger.debug(f"Found {len(table_rows)} table rows")
+            for row in table_rows:
+                try:
+                    release = self._parse_table_row(row, date)
+                    if release:
+                        releases.append(release)
+                except Exception as e:
+                    logger.debug(f"Error parsing table row: {e}")
+                    continue
+        
+        # If no table rows, try div-based structure
+        if not releases:
+            logger.debug("No table rows found, trying div-based structure")
+            release_items = soup.find_all("div", class_="content")
+            
+            for item in release_items:
+                try:
+                    release = self._parse_release_item(item, date)
+                    if release:
+                        releases.append(release)
+                except Exception as e:
+                    logger.debug(f"Error parsing div item: {e}")
+                    continue
         
         return releases
     
+    def _parse_table_row(self, row, target_date) -> Optional[Dict]:
+        """Parse a table row containing release information.
+        
+        Args:
+            row: BeautifulSoup tr element.
+            target_date: Date to filter for.
+            
+        Returns:
+            Dictionary with release details or None if date doesn't match.
+        """
+        try:
+            cells = row.find_all("td")
+            if len(cells) < 3:
+                return None
+            
+            # Typical structure: Date | Ministry | Title (as link)
+            date_str = cells[0].get_text(strip=True)
+            ministry = cells[1].get_text(strip=True) if len(cells) > 1 else "Unknown"
+            
+            # Find link in title cell
+            title_cell = cells[2] if len(cells) > 2 else cells[-1]
+            link_elem = title_cell.find("a", class_=["linkNews", "news-link"])
+            
+            # If no specific class, try any link
+            if not link_elem:
+                link_elem = title_cell.find("a")
+            
+            if not link_elem:
+                return None
+            
+            title = link_elem.get_text(strip=True)
+            link = link_elem.get("href", "")
+            
+            # Construct full URL if relative
+            if link and not link.startswith("http"):
+                link = self.base_url + link
+            
+            # Parse date
+            release_date = self._parse_date(date_str)
+            
+            if not release_date:
+                return None
+            
+            # Filter by date
+            if release_date.date() != target_date.date():
+                return None
+            
+            return {
+                "title": title,
+                "link": link,
+                "date": release_date,
+                "ministry": ministry,
+                "description": "",
+                "source": "PIB"
+            }
+        
+        except Exception as e:
+            logger.debug(f"Error parsing table row: {e}")
+            return None
+    
     def _parse_release_item(self, item, target_date) -> Optional[Dict]:
-        """Parse a single release item from HTML.
+        """Parse a single release item from HTML (div-based structure).
         
         Args:
             item: BeautifulSoup element containing release info.
@@ -148,7 +225,10 @@ class PIBScraper:
         """
         try:
             # Extract title
-            title_elem = item.find("a", class_="newstitle")
+            title_elem = item.find("a", class_=["newstitle", "linkNews"])
+            if not title_elem:
+                title_elem = item.find("a")
+            
             if not title_elem:
                 return None
             
@@ -161,6 +241,10 @@ class PIBScraper:
             
             # Extract date
             date_elem = item.find("span", class_="newsupdatedate")
+            if not date_elem:
+                # Try to find any date-like text
+                date_elem = item.find("span")
+            
             if not date_elem:
                 return None
             
@@ -192,7 +276,7 @@ class PIBScraper:
             }
         
         except Exception as e:
-            logger.warning(f"Error parsing release item: {e}")
+            logger.debug(f"Error parsing release item: {e}")
             return None
     
     def _parse_date(self, date_str: str) -> Optional[datetime]:
@@ -206,9 +290,23 @@ class PIBScraper:
         """
         try:
             # Try multiple date formats
-            for fmt in ["%d-%b-%Y %H:%M", "%d-%B-%Y %H:%M", "%d/%m/%Y %H:%M"]:
+            date_formats = [
+                "%d-%b-%Y %H:%M",      # 05-Aug-2026 14:30
+                "%d-%B-%Y %H:%M",      # 05-August-2026 14:30
+                "%d/%m/%Y %H:%M",      # 05/08/2026 14:30
+                "%d %b %Y",            # 05 Aug 2026
+                "%d %B %Y",            # 05 August 2026
+                "%d-%m-%Y",            # 05-08-2026
+                "%d/%m/%Y",            # 05/08/2026
+                "%d %b %Y %H:%M",      # 05 Aug 2026 14:30
+            ]
+            
+            for fmt in date_formats:
                 try:
                     dt = datetime.strptime(date_str, fmt)
+                    # If no time specified, use noon
+                    if dt.hour == 0 and dt.minute == 0:
+                        dt = dt.replace(hour=12)
                     # Localize to configured timezone
                     return settings.TIMEZONE.localize(dt)
                 except ValueError:
