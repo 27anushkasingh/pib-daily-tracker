@@ -40,7 +40,7 @@ class PIBScraper:
             total=MAX_RETRIES,
             backoff_factor=RETRY_BACKOFF_FACTOR,
             status_forcelist=[429, 500, 502, 503, 504],
-            method_whitelist=["GET", "POST"]
+            allowed_methods=["GET", "POST"]
         )
         
         adapter = HTTPAdapter(max_retries=retry_strategy)
